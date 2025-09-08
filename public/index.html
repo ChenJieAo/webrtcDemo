@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>一对一音频通话</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
+</head>
+<body class="bg-gray-100 min-h-screen p-4">
+  <div class="max-w-md mx-auto">
+    <!-- 登录区域 -->
+    <div id="login-section" class="bg-white rounded-xl shadow-lg p-6 mb-6">
+      <h1 class="text-2xl font-bold text-center mb-4">音频通话</h1>
+      <div class="mb-4">
+        <input type="text" id="user-id" placeholder="输入你的ID" 
+               class="w-full px-4 py-2 border border-gray-300 rounded-lg">
+      </div>
+      <button id="login-btn" class="w-full bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700">
+        登录
+      </button>
+    </div>
+
+    <!-- 主操作区域 -->
+    <div id="main-section" class="hidden bg-white rounded-xl shadow-lg p-6 mb-6">
+      <div class="mb-4">
+        <p>你的ID: <span id="current-user" class="font-semibold"></span></p>
+      </div>
+      <div class="mb-4">
+        <input type="text" id="callee-id" placeholder="输入对方ID" 
+               class="w-full px-4 py-2 border border-gray-300 rounded-lg">
+      </div>
+      <button id="call-btn" class="w-full bg-green-600 text-white py-2 rounded-lg hover:bg-green-700">
+        发起呼叫
+      </button>
+    </div>
+
+    <!-- 通话区域 -->
+    <div id="call-section" class="hidden bg-white rounded-xl shadow-lg p-6 mb-6">
+      <h2>正在与 <span id="call-partner" class="font-semibold"></span> 通话中</h2>
+      <div class="mt-4 flex justify-center space-x-4">
+        <button id="mute-btn" class="bg-gray-200 p-3 rounded-full">
+          <i class="fa fa-microphone"></i>
+        </button>
+        <button id="hangup-btn" class="bg-red-600 text-white p-3 rounded-full">
+          <i class="fa fa-phone fa-rotate-135"></i>
+        </button>
+      </div>
+    </div>
+
+    <!-- 接听区域 -->
+    <div id="incoming-call-section" class="fixed inset-0 bg-black/70 flex items-center justify-center z-50 hidden">
+      <div class="bg-white rounded-xl p-6 max-w-sm w-full mx-4">
+        <h2 class="text-xl font-bold mb-2 text-center">来电</h2>
+        <p class="text-center mb-6">用户 <span id="incoming-caller" class="font-semibold text-blue-600"></span> 正在呼叫你</p>
+        <div class="flex justify-center space-x-6">
+          <button id="answer-btn" class="bg-green-600 text-white p-4 rounded-full hover:bg-green-700">
+            <i class="fa fa-phone text-xl"></i>
+          </button>
+          <button id="decline-btn" class="bg-red-600 text-white p-4 rounded-full hover:bg-red-700">
+            <i class="fa fa-phone fa-rotate-135 text-xl"></i>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 呼叫中区域 -->
+    <div id="calling-section" class="fixed inset-0 bg-black/70 flex items-center justify-center z-50 hidden">
+      <div class="bg-white rounded-xl p-6 max-w-sm w-full mx-4 text-center">
+        <h2 class="text-xl font-bold mb-4">正在呼叫...</h2>
+        <p class="mb-6">正在呼叫 <span id="outgoing-callee" class="font-semibold"></span></p>
+        <button id="cancel-call-btn" class="bg-red-600 text-white px-6 py-2 rounded-lg">
+          取消呼叫
+        </button>
+      </div>
+    </div>
+
+    <!-- 调试日志 -->
+    <div id="debug" class="bg-gray-800 text-white p-2 rounded text-xs mt-4 h-40 overflow-y-auto">
+      <div id="log"></div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    // DOM元素
+    const loginSection = document.getElementById('login-section');
+    const mainSection = document.getElementById('main-section');
+    const callSection = document.getElementById('call-section');
+    const incomingCallSection = document.getElementById('incoming-call-section');
+    const callingSection = document.getElementById('calling-section');
+    
+    // 登录相关
+    const userIdInput = document.getElementById('user-id');
+    const loginBtn = document.getElementById('login-btn');
+    const currentUserEl = document.getElementById('current-user');
+    
+    // 呼叫相关
+    const calleeIdInput = document.getElementById('callee-id');
+    const callBtn = document.getElementById('call-btn');
+    const callPartnerEl = document.getElementById('call-partner');
+    const incomingCallerEl = document.getElementById('incoming-caller');
+    const outgoingCalleeEl = document.getElementById('outgoing-callee');
+    
+    // 按钮
+    const answerBtn = document.getElementById('answer-btn');
+    const declineBtn = document.getElementById('decline-btn');
+    const hangupBtn = document.getElementById('hangup-btn');
+    const cancelCallBtn = document.getElementById('cancel-call-btn');
+    const muteBtn = document.getElementById('mute-btn');
+    
+    // 调试
+    const logEl = document.getElementById('log');
+    
+    // 全局变量
+    let socket;
+    let peerConnection;
+    let localStream;
+    let currentUserId;
+    let currentCallId = null;
+    let currentCalleeId = null;
+    let currentCallerId = null;
+    let isMuted = false;
+    let isCalling = false;
+    
+    // ICE服务器配置
+    const iceServers = [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' }
+    ];
+    
+    // 日志函数
+    function log(message) {
+      const timestamp = new Date().toLocaleTimeString();
+      const logEntry = document.createElement('div');
+      logEntry.innerHTML = `[${timestamp}] ${message}`;
+      logEl.appendChild(logEntry);
+      logEl.scrollTop = logEl.scrollHeight;
+      console.log(`[${timestamp}] ${message}`);
+    }
+    
+    // 初始化Socket连接
+    function initSocket() {
+      socket = io({
+        reconnection: true,
+        reconnectionAttempts: 5
+      });
+      
+      socket.on('connect', () => {
+        log('已连接到服务器，Socket ID: ' + socket.id);
+      });
+      
+      socket.on('login-success', (userId) => {
+        currentUserId = userId;
+        currentUserEl.textContent = userId;
+        loginSection.classList.add('hidden');
+        mainSection.classList.remove('hidden');
+        log(`登录成功，用户ID: ${userId}`);
+      });
+      
+      // 收到来电
+      socket.on('incoming-call', (data) => {
+        log(`收到来自 ${data.callerId} 的来电，通话ID: ${data.callId}`);
+        currentCallId = data.callId;
+        currentCallerId = data.callerId;
+        incomingCallerEl.textContent = data.callerId;
+        incomingCallSection.classList.remove('hidden');
+      });
+      
+      // 呼叫已被接听
+      socket.on('call-answered', async (data) => {
+        if (!data.callId) {
+          log('收到无效的通话应答：缺少通话ID');
+          return;
+        }
+        
+        // 处理本地通话ID为null的异常情况
+        if (!currentCallId) {
+          log(`警告：本地通话ID为null，强制使用收到的通话ID: ${data.callId}`);
+          currentCallId = data.callId;
+        }
+        
+        if (data.callId !== currentCallId) {
+          log(`忽略不匹配的通话应答，当前通话ID: ${currentCallId}, 收到: ${data.callId}`);
+          return;
+        }
+        
+        if (!isCalling) {
+          log('忽略通话应答：当前未处于呼叫中状态');
+          return;
+        }
+        
+        log(`通话 ${data.callId} 已被接听`);
+        isCalling = false;
+        
+        // 强制更新UI
+        callingSection.classList.add('hidden');
+        callSection.classList.remove('hidden');
+        callPartnerEl.textContent = currentCalleeId;
+        
+        // 超时检查UI状态
+        setTimeout(() => {
+          if (!callingSection.classList.contains('hidden')) {
+            log('强制隐藏呼叫中界面（超时检查）');
+            callingSection.classList.add('hidden');
+          }
+          if (callSection.classList.contains('hidden')) {
+            log('强制显示通话界面（超时检查）');
+            callSection.classList.remove('hidden');
+          }
+        }, 300);
+        
+        // 创建并发送offer
+        try {
+          if (!peerConnection) {
+            log('警告：对等连接未初始化，重新创建');
+            await createPeerConnection();
+          }
+          
+          const offer = await peerConnection.createOffer();
+          await peerConnection.setLocalDescription(offer);
+          
+          socket.emit('offer', {
+            callId: currentCallId,
+            offer: offer
+          }, (ack) => {
+            if (ack?.success) {
+              log('Offer已成功发送到服务器');
+            } else {
+              log('发送Offer失败: ' + (ack?.error || '未知错误'));
+              setTimeout(() => {
+                socket.emit('offer', {callId: currentCallId, offer: offer});
+              }, 1000);
+            }
+          });
+        } catch (e) {
+          log(`创建offer错误: ${e.message}`);
+          alert('建立通话失败，请重试');
+          resetCallState();
+        }
+      });
+      
+      // 收到offer
+      socket.on('offer', async (data) => {
+        if (data.callId !== currentCallId) return;
+        
+        log(`收到offer，通话ID: ${data.callId}`);
+        try {
+          await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
+          const answer = await peerConnection.createAnswer();
+          await peerConnection.setLocalDescription(answer);
+          socket.emit('answer', {
+            callId: currentCallId,
+            answer: answer
+          });
+          log('已发送answer');
+        } catch (e) {
+          log(`处理offer错误: ${e.message}`);
+        }
+      });
+      
+      // 收到answer
+      socket.on('answer', async (data) => {
+        if (data.callId !== currentCallId) return;
+        
+        log(`收到answer，通话ID: ${data.callId}`);
+        try {
+          await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+          log('已设置远程描述(answer)');
+        } catch (e) {
+          log(`处理answer错误: ${e.message}`);
+        }
+      });
+      
+      // 收到ICE候选者
+      socket.on('ice-candidate', async (data) => {
+        if (data.callId !== currentCallId || !peerConnection) return;
+        
+        try {
+          await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+          log('已添加ICE候选者');
+        } catch (e) {
+          log(`添加ICE候选者错误: ${e.message}`);
+        }
+      });
+      
+      // 通话结束
+      socket.on('call-ended', (data) => {
+        log(`通话 ${data.callId} 已结束`);
+        resetCallState();
+      });
+      
+      // 错误处理
+      socket.on('error', (error) => {
+        log(`Socket错误: ${error}`);
+        alert(`发生错误: ${error}`);
+      });
+    }
+    
+    // 获取本地媒体流
+    async function getLocalStream() {
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        log('已获取本地音频流');
+        return localStream;
+      } catch (e) {
+        log(`获取媒体流错误: ${e.message}`);
+        alert('无法访问麦克风，请确保已授予权限');
+        throw e;
+      }
+    }
+    
+    // 创建对等连接
+    async function createPeerConnection() {
+      cleanupPeerConnection();
+      
+      const stream = await getLocalStream();
+      
+      peerConnection = new RTCPeerConnection({ iceServers: iceServers });
+      
+      stream.getTracks().forEach(track => {
+        peerConnection.addTrack(track, stream);
+      });
+      
+      peerConnection.addEventListener('icecandidate', (event) => {
+        if (event.candidate && currentCallId) {
+          socket.emit('ice-candidate', {
+            callId: currentCallId,
+            candidate: event.candidate
+          });
+          log('已发送ICE候选者');
+        } else if (!currentCallId) {
+          log('忽略ICE候选者：通话ID未初始化');
+        }
+      });
+      
+      peerConnection.addEventListener('track', (event) => {
+        log('收到远程音频流');
+      });
+      
+      peerConnection.addEventListener('connectionstatechange', () => {
+        log(`对等连接状态: ${peerConnection.connectionState}`);
+        if (peerConnection.connectionState === 'connected') {
+          log('通话已成功连接');
+        }
+      });
+      
+      log('已创建对等连接');
+      return peerConnection;
+    }
+    
+    // 发起呼叫
+    async function startCall() {
+      const calleeId = calleeIdInput.value.trim();
+      if (!calleeId) {
+        alert('请输入对方ID');
+        return;
+      }
+      
+      resetCallState();
+      
+      try {
+        currentCalleeId = calleeId;
+        outgoingCalleeEl.textContent = calleeId;
+        isCalling = true;
+        
+        await createPeerConnection();
+        
+        socket.emit('call', { calleeId: calleeId }, (ack) => {
+          if (ack?.success && ack?.callId) {
+            currentCallId = ack.callId;
+            log(`服务器已收到呼叫请求，通话ID: ${currentCallId}`);
+            
+            mainSection.classList.add('hidden');
+            callingSection.classList.remove('hidden');
+          } else {
+            log(`发起呼叫失败: ${ack?.error || '未知错误'}`);
+            alert(`呼叫失败: ${ack?.error || '请重试'}`);
+            resetCallState();
+          }
+        });
+      } catch (e) {
+        log(`发起呼叫错误: ${e.message}`);
+        alert(`无法发起呼叫: ${e.message}`);
+        resetCallState();
+      }
+    }
+    
+    // 接听呼叫
+    async function answerCall() {
+      if (!currentCallId || !currentCallerId) {
+        log('接听错误: 没有有效的通话信息');
+        return;
+      }
+      
+      try {
+        log(`接听来自 ${currentCallerId} 的呼叫`);
+        
+        await createPeerConnection();
+        
+        incomingCallSection.classList.add('hidden');
+        callSection.classList.remove('hidden');
+        callPartnerEl.textContent = currentCallerId;
+        
+        socket.emit('answer-call', { callId: currentCallId }, (ack) => {
+          if (!ack?.success) {
+            log('发送接听确认失败，重试...');
+            setTimeout(() => {
+              socket.emit('answer-call', { callId: currentCallId });
+            }, 1000);
+          }
+        });
+        log(`已通知服务器接听通话 ${currentCallId}`);
+      } catch (e) {
+        log(`接听呼叫错误: ${e.message}`);
+        socket.emit('decline-call', { callId: currentCallId });
+        incomingCallSection.classList.add('hidden');
+      }
+    }
+    
+    // 拒绝呼叫
+    function declineCall() {
+      if (currentCallId) {
+        log(`拒绝来自 ${currentCallerId} 的呼叫`);
+        socket.emit('decline-call', { callId: currentCallId });
+        incomingCallSection.classList.add('hidden');
+        resetCallState();
+      }
+    }
+    
+    // 挂断通话
+    function hangupCall() {
+      if (currentCallId) {
+        log(`挂断通话 ${currentCallId}`);
+        socket.emit('hangup-call', { callId: currentCallId });
+        resetCallState();
+      }
+    }
+    
+    // 重置所有通话状态
+    function resetCallState() {
+      // 重置UI
+      callSection.classList.add('hidden');
+      callingSection.classList.add('hidden');
+      incomingCallSection.classList.add('hidden');
+      mainSection.classList.remove('hidden');
+      
+      // 重置状态变量
+      currentCallId = null;
+      currentCalleeId = null;
+      currentCallerId = null;
+      isCalling = false;
+      
+      // 清理连接
+      cleanupPeerConnection();
+    }
+    
+    // 清理对等连接
+    function cleanupPeerConnection() {
+      if (peerConnection) {
+        peerConnection.close();
+        peerConnection = null;
+        log('已关闭对等连接');
+      }
+      
+      if (localStream) {
+        localStream.getTracks().forEach(track => track.stop());
+        localStream = null;
+        log('已停止本地媒体流');
+      }
+    }
+    
+    // 切换静音
+    function toggleMute() {
+      if (localStream) {
+        isMuted = !isMuted;
+        localStream.getAudioTracks().forEach(track => {
+          track.enabled = !isMuted;
+        });
+        
+        if (isMuted) {
+          muteBtn.innerHTML = '<i class="fa fa-microphone-slash"></i>';
+          muteBtn.classList.add('bg-red-600', 'text-white');
+          muteBtn.classList.remove('bg-gray-200');
+        } else {
+          muteBtn.innerHTML = '<i class="fa fa-microphone"></i>';
+          muteBtn.classList.remove('bg-red-600', 'text-white');
+          muteBtn.classList.add('bg-gray-200');
+        }
+      }
+    }
+    
+    // 绑定事件
+    function bindEvents() {
+      loginBtn.addEventListener('click', () => {
+        const userId = userIdInput.value.trim();
+        if (userId) {
+          socket.emit('login', userId);
+        } else {
+          alert('请输入用户ID');
+        }
+      });
+      
+      callBtn.addEventListener('click', startCall);
+      answerBtn.addEventListener('click', answerCall);
+      declineBtn.addEventListener('click', declineCall);
+      hangupBtn.addEventListener('click', hangupCall);
+      cancelCallBtn.addEventListener('click', hangupCall);
+      muteBtn.addEventListener('click', toggleMute);
+      
+      // 键盘支持
+      userIdInput.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') loginBtn.click();
+      });
+      
+      calleeIdInput.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') callBtn.click();
+      });
+    }
+    
+    // 初始化应用
+    function init() {
+      initSocket();
+      bindEvents();
+      log('应用已初始化');
+    }
+    
+    window.onload = init;
+  </script>
+</body>
+</html>
+    
